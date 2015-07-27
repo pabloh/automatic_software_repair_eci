@@ -1,0 +1,27 @@
+#!/usr/bin/env ruby
+
+$:.unshift File.join(__dir__, '..', 'lib')
+$:.unshift File.join(__dir__, '..', 'test')
+
+require 'bundler/setup'
+require 'asr'
+
+command_doc = <<DOC
+Use:
+  fix_ruby <source code> <test suite>
+DOC
+
+abort(command_doc) unless $*.size == 2
+buggy_code, test_suite = $*
+
+module Minitest
+  @@installed_at_exit = true
+end
+
+require File.join(__dir__, '..', buggy_code)
+require File.join(__dir__, '..', test_suite)
+
+suite = Minitest::Runnable.runnables.last
+code = File.read(File.join(__dir__, '..', buggy_code))
+
+SoftwareAutoRepair.new(code, suite).try_to_fix
