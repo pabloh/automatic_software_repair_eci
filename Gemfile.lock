@@ -66,6 +66,3 @@ DEPENDENCIES
   pry-byebug
   pry-rescue
   unparser
-
-BUNDLED WITH
-   1.10.5

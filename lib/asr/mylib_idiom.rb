@@ -6,7 +6,7 @@ class PeopleIdiom
   end
 
   def retired
-    @list.select {|person| person.age >= 65 }
+    @list.select {|person| person.age <= 65 }
   end
 
   def drafted
