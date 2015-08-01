@@ -4,6 +4,7 @@ source "http://rubygems.org"
 gem 'parser'
 gem 'unparser'
 gem 'diffy'
+gem 'descendants_tracker'
 
 gem "minitest"
 gem "minitest-reporters"

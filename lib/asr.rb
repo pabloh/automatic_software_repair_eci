@@ -1,6 +1,7 @@
 require 'unparser'
 require 'minitest'
 require 'diffy'
+require 'descendants_tracker'
 
 require 'pry'
 
@@ -10,11 +11,14 @@ module Minitest
 end
 
 class SoftwareAutoRepair
+  attr_reader :program_template, :conflicts_graph
   def initialize(code_path, suite_path)
     require code_path
     require suite_path
 
     @code, @suite = File.read(code_path), Minitest::Runnable.runnables.last
+
+    parse_program
   end
 
   def try_to_fix
@@ -48,13 +52,10 @@ class SoftwareAutoRepair
     @failing_tests ||= @suite.runnable_methods.reject {|test| run_test(test) }
   end
 
-  def program_template
-    @template ||= parse_program
-  end
-
   def each_variant
-    each_alternative_mapper do |mapper|
-      yield AlternativeProgramsGenerator.new(mapper).process(program_template)
+    each_alternatives_mapper do |mapper|
+      alternative_ast = AlternativeProgramsGenerator.new(mapper).process(program_template)
+      yield Unparser.unparse(alternative_ast)
     end
   end
 
@@ -83,31 +84,12 @@ private
 
   def parse_program
     detector = HotspotsDetector.new
-    detector.process(as_ast(@code)).tap { @conflicts_graph = detector.detected_conflicts }
+    @program_template = detector.process(as_ast(@code)).tap { @conflicts_graph = detector.detected_conflicts }
   end
 
-  def each_alternative_mapper(&bl)
-    mapper = {}.compare_by_identity
-    enumerate_forests(@conflicts_graph, mapper, &bl)
-  end
-
-  def enumerate_forests(hotspots, mapper, &bl)
-    first, *rest = hotspots
-
-    first.conflicts.each_with_index do |hotspot, idx|
-      mapper[hotspot] = idx
-      rest.any? ? enumerate_hotspots(rest, mapper, &bl) : enumerate_conflicts(hotspots.conflicts, &bl)
-    end
-  end
-
-  def enumerate_conflicts(hotspots, mapper, &bl)
-    hotspots.each_with_index do |hotspot, idx|
-      if hotspot.conflicts.none?
-        bl.call(mapper)
-      else
-        enumerate_hotspots(hotspot.conflicts, mapper, &bl)
-      end
-    end
+  def each_alternatives_mapper(&bl)
+    first, *rest = conflicts_graph.map(&:alternatives_mapper)
+    rest.empty? ? first.each(&bl) : first.product(*rest) {|mappers| yield mappers.reduce(&:merge) }
   end
 end
 
@@ -121,21 +103,33 @@ class HotspotsDetector < Parser::AST::Processor
   end
 
   def on_send(node)
-    if hotspot_class = MessageHotspot.detect_hotspot_for(node)
+    if hotspot_class = MessageHotspot.detect_hotspot_at(node)
       rec, sel, *args = *node
-      new_rec, rec_hotspots = process_and_collect_hotspots(rec)
-      new_args, args_hotspots = process_all_and_collect_hotspots(args)
 
-      hotspot_at(hotspot_class, node, [new_rec, sel, *new_args], rec_hotspots + args_hotspots)
+      lower_hotspots = collect_hotspots do
+        rec = process(rec)
+        args = process_all(args)
+      end
+
+      hotspot_at(hotspot_class, node, [rec, sel, *args], lower_hotspots)
     else
       super
     end
   end
 
   def on_block(node)
-    if hotspot_class = BlockHotspot.detect_hotspot_for(node)
-      new_childs, hotspots = process_all_and_collect_hotspots(node.children)
-      hotspot_at(hotspot_class, node, new_childs, hotspots)
+    if hotspot_class = BlockHotspot.detect_hotspot_at(node)
+      exp, *rest = *node
+      rec, sel, *args = *exp
+
+      lower_hotspots = collect_hotspots do
+        rec = process(rec)
+        args = process_all(args)
+        rest = process_all(rest)
+      end
+
+      exp = exp.updated(nil, [rec, sel, *args])
+      hotspot_at(hotspot_class, node, [exp ,*rest], lower_hotspots)
     else
       super
     end
@@ -147,82 +141,63 @@ private
     klass.new(new_node, conflicts: conflicts).tap {|h| @hotspots_stack.push(h) }
   end
 
-  def process_all_and_collect_hotspots(nodes)
-    nodes.each_with_object([[],[]]) do |node, (new_nodes, hotspots)|
-      new_node, new_hotspots = process_and_collect_hotspots(node)
-
-      new_nodes << new_node
-      hotspots.concat(new_hotspots)
-    end
-  end
-
-  def process_and_collect_hotspots(node)
-    stack_size = @hotspots_stack.size
-    new_node = process(node)
-    hotspots = @hotspots_stack.pop(@hotspots_stack.size - stack_size)
-    
-    [new_node, hotspots]
+  def collect_hotspots
+    initial_size = @hotspots_stack.size
+    yield
+    @hotspots_stack.pop(@hotspots_stack.size - initial_size)
   end
 end
 
 
 class AlternativeProgramsGenerator < Parser::AST::Processor
-  def intialize(alternatives_mapper)
+  def initialize(alternatives_mapper)
     @alternatives = alternatives_mapper
   end
 
   def on_hotspot(hotspot)
-    alt_childs = process_all(hotspot.original_childs)
-    alternative = hotspot.alternatives[index_for(hotspot)]
-    alternative.updated(nil, alt_childs)
+    updated_node = process(hotspot.original_node)
+    apply_alternative(updated_node, hotspot)
   end
 
 private
-  def index_for(hotspot)
-    @iterator[hotspot]
+  def apply_alternative(node, hotspot)
+    @alternatives.fetch(hotspot).call(node)
   end
 end
 
 
 class Hotspot < Parser::AST::Node
+  extend DescendantsTracker
   attr :conflicts
   
-  class << self
-    def inherited(subclass)
-      (@subclasses ||= []) << subclass
-    end
-
-    def descendants
-      @descendants ||= if @subclasses
-                         @subclasses + @subclasses.flat_map(&:descendants)
-                       else []
-                       end
-    end
-
-    def detect_hotspot_for(node)
-      descendants.detect {|subclass| subclass.applies?(node) }
-    end
-
-    def applies?(node)
-      false
-    end
+  def self.detect_hotspot_at(node)
+    descendants.detect {|subclass| subclass.applies?(node) }
   end
 
-  def alternatives
-    [original_node]
-  end
-
-  def original_node
-    children.first
-  end
-
-  def original_childs
-    original_node.to_a
+  def self.applies?(node)
+    false
   end
 
   def initialize(node, conflicts: [])
     @conflicts = conflicts
     super(:hotspot, [node])
+  end
+
+  def alternatives
+    -> node { node }
+  end
+
+  def alternatives_mapper
+    mappers = alternatives.map {|alter| { self => alter }.compare_by_identity }
+    if conflicts.none?
+      mappers
+    else
+      mappers.product(*conflicts.map(&:alternatives_mapper)).map {|mapper, *conflict_mappers| conflict_mappers.reduce(mapper.dup, :merge!) }
+    end
+  end
+
+  def original_node
+    children.first
   end
 end
 
@@ -241,9 +216,13 @@ end
 class OperatorHotspot < MessageHotspot
   def alternatives
     self.class.selectors.map do |new_sel|
-      rec, _sel, *args = *original_node
-      original_node.updated(nil, [rec, new_sel, *args])
+      -> node { alternative_node_using(node, new_sel) }
     end
+  end
+
+  def alternative_node_using(node, new_sel)
+    rec, _sel, *args = *node
+    node.updated(nil, [rec, new_sel, *args])
   end
 end
 
@@ -265,7 +244,8 @@ class PredicateHotspot < MessageHotspot
   end
 
   def alternatives
-    [original_node, Parser::AST::Node.new(:send, [original_node, :!])]
+    [ -> node { node },
+      -> node { Parser::AST::Node.new(:send, [node, :!]) } ]
   end
 end
 
@@ -281,10 +261,17 @@ class BlockHotspot < Hotspot
   end
 
   def alternatives
-    exp, args, body = *original_node
-    not_body = body ? Parser::AST::Node.new(:send, [body, :!]) : Parser::AST::Node.new(:true)
+    self.class.selectors.map do |new_sel|
+      -> node { alternative_node_using(node, new_sel) }
+    end
+  end
 
-    [original_node, original_node.updated([exp, args, not_body])]
+  def alternative_node_using(node, new_sel)
+    exp, *rest = *node
+    rec, _sel, *args = *exp
+    new_exp = exp.updated(nil, [rec, new_sel, *args])
+
+    node.updated(nil, [new_exp, *rest])
   end
 end
 
@@ -300,34 +287,3 @@ class QuantifierHotspot < BlockHotspot
     [:all?, :none?, :any?, :one?]
   end
 end
-
-
-### Borrar luego todo esto
-__END__
-
-example1 = <<CODE
-  arr = [23, 11, 12, 42, 12, 20]
-  result = []
-  for val in arr
-    res << val if val < 20
-  end
-
-  res
-CODE
-
-example2 = <<CODE
-  arr = [23, 11, 12, 42, 12]
-  res = arr.select {|val| val < 20 }
-CODE
-
-example3 = <<CODE
-  arr = [23, 11, 12, 42, 12]
-  res = arr.select {|val| val.even? }
-CODE
-
-ar = SoftwareAutoRepair.new(File.join(__dir__, 'asr/mylib_idiom.rb'), File.join(__dir__, '../test/test_mylib_idiom.rb'))
-template = ar.program_template
-
-puts template.inspect
-
-#puts ProgramGenerator.new.process(metaprog)
