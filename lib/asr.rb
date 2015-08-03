@@ -1,7 +1,7 @@
-require 'unparser'
 require 'minitest'
 require 'diffy'
 require 'descendants_tracker'
+require 'parser/current'
 
 require 'pry'
 
@@ -34,13 +34,6 @@ class SoftwareAutoRepair
     puts "No fixes found"
   end
 
-  def rewrite_program_for(variant)
-    buffer  = Parser::Source::Buffer.new('(alternative)').tap {|b| b.source = @code}
-    rewriter = AlternativeProgramRewriter.new(variant)
-
-    rewriter.rewrite(buffer, @program_template)
-  end
-
   def run_test(test) # Returns true when test passes
     @suite.new(test).run.passed?
   end
@@ -62,6 +55,13 @@ class SoftwareAutoRepair
   end
 
 private
+  def rewrite_program_for(variant_mapper)
+    buffer  = Parser::Source::Buffer.new('(alternative)').tap {|b| b.source = @code}
+    rewriter = AlternativeProgramRewriter.new(variant_mapper)
+
+    rewriter.rewrite(buffer, @program_template)
+  end
+
   def print_fix(variant)
     puts "Generated fix for failing tests:\n"
     puts Diffy::Diff.new(@code, variant, context: 3, include_diff_info: true).to_s(:color).
@@ -92,7 +92,7 @@ private
 
   def each_alternatives_mapper(&bl)
     first, *rest = @detected_hotspots.map(&:alternatives_mapper)
-    rest.empty? ? first.each(&bl) : first.product(*rest) {|mappers| yield mappers.reduce(&:merge) }
+    rest.empty? ? first.each(&bl) : first.product(*rest) {|mappers| yield mappers.reduce(:merge) }
   end
 end
 
@@ -214,7 +214,8 @@ class Hotspot < Parser::AST::Node
     if conflicts.none?
       mappers
     else
-      mappers.product(*conflicts.map(&:alternatives_mapper)).map {|mapper, *conflict_mappers| conflict_mappers.reduce(mapper.dup, :merge!) }
+      mappers.product(*conflicts.map(&:alternatives_mapper)).
+        map {|maps| maps.reduce(:merge) }
     end
   end
 
@@ -241,7 +242,7 @@ end
 
 class OperatorHotspot < MessageHotspot
   def self.alternatives
-    selectors.map {|sel| sel.to_s.freeze }
+    selectors.map(&:to_s)
   end
 
   def operator_location
@@ -282,7 +283,7 @@ class BlockHotspot < Hotspot
   end
 
   def self.alternatives
-    selectors.map {|sel| sel.to_s.freeze }
+    selectors.map(&:to_s)
   end
 
   def self.applies?(node)
