@@ -1,5 +1,6 @@
 require 'asr/person'
 
+# People class using idiomatic ruby source code
 class PeopleIdiom
   def initialize(*list)
     @list = list
@@ -10,7 +11,7 @@ class PeopleIdiom
   end
 
   def drafted
-    @list.select {|person| person.male? }.reject {|person| person.dni.even? }
+    @list.select {|person| person.male? }.select {|person| person.dni.even? }
   end
 
   def draftable?

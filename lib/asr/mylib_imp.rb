@@ -1,5 +1,6 @@
 require 'asr/person'
 
+# People class using procedural like source code
 class PeopleImp
   def initialize(*list)
     @list = list

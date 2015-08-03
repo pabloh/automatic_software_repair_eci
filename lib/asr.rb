@@ -11,7 +11,6 @@ module Minitest
 end
 
 class SoftwareAutoRepair
-  attr_reader :program_template, :conflicts_graph
   def initialize(code_path, suite_path)
     require code_path
     require suite_path
@@ -35,6 +34,12 @@ class SoftwareAutoRepair
     puts "No fixes found"
   end
 
+  def rewrite_program_for(variant)
+    buffer  = Parser::Source::Buffer.new('(alternative)').tap {|b| b.source = @code}
+    rewriter = AlternativeProgramRewriter.new(variant)
+
+    rewriter.rewrite(buffer, @program_template)
+  end
 
   def run_test(test) # Returns true when test passes
     @suite.new(test).run.passed?
@@ -53,10 +58,7 @@ class SoftwareAutoRepair
   end
 
   def each_variant
-    each_alternatives_mapper do |mapper|
-      alternative_ast = AlternativeProgramsGenerator.new(mapper).process(program_template)
-      yield Unparser.unparse(alternative_ast)
-    end
+    each_alternatives_mapper {|mapper| yield rewrite_program_for(mapper) }
   end
 
 private
@@ -67,8 +69,8 @@ private
       sub(%r{\+\+\+ /tmp/diffy.[^\n]+}, '+++ fixed file')
   end
 
-  def as_ast(code)
-    Parser::CurrentRuby.parse(code)
+  def ast
+    @ast ||= Parser::CurrentRuby.parse(@code)
   end
 
   def as_source(ast)
@@ -84,11 +86,12 @@ private
 
   def parse_program
     detector = HotspotsDetector.new
-    @program_template = detector.process(as_ast(@code)).tap { @conflicts_graph = detector.detected_conflicts }
+    @program_template = detector.process(ast)
+    @detected_hotspots = detector.detected_hotspots
   end
 
   def each_alternatives_mapper(&bl)
-    first, *rest = conflicts_graph.map(&:alternatives_mapper)
+    first, *rest = @detected_hotspots.map(&:alternatives_mapper)
     rest.empty? ? first.each(&bl) : first.product(*rest) {|mappers| yield mappers.reduce(&:merge) }
   end
 end
@@ -98,7 +101,7 @@ class HotspotsDetector < Parser::AST::Processor
     @hotspots_stack = []
   end
 
-  def detected_conflicts
+  def detected_hotspots
     @hotspots_stack
   end
 
@@ -148,20 +151,35 @@ private
   end
 end
 
-
-class AlternativeProgramsGenerator < Parser::AST::Processor
+class AlternativeProgramRewriter < Parser::Rewriter
   def initialize(alternatives_mapper)
-    @alternatives = alternatives_mapper
+    @alternatives_mapper = alternatives_mapper
   end
 
-  def on_hotspot(hotspot)
-    updated_node = process(hotspot.original_node)
-    apply_alternative(updated_node, hotspot)
+  def on_operator_hotspot(hotspot)
+    replace(hotspot.operator_location, alternative_for(hotspot))
+    process(hotspot.original_node)
   end
+
+  alias_method :on_comparison_hotspot, :on_operator_hotspot
+  alias_method :on_equality_hotspot, :on_operator_hotspot
+
+  def on_predicate_hotspot(hotspot)
+    insert_before(hotspot.expression_location, alternative_for(hotspot))
+    process(hotspot.original_node)
+  end
+
+  def on_block_hotspot(hotspot)
+    replace(hotspot.selector_location, alternative_for(hotspot))
+    process(hotspot.original_node)
+  end
+
+  alias_method :on_filter_hotspot, :on_block_hotspot
+  alias_method :on_quantifier_hotspot, :on_block_hotspot
 
 private
-  def apply_alternative(node, hotspot)
-    @alternatives.fetch(hotspot).call(node)
+  def alternative_for(hotspot)
+    @alternatives_mapper.fetch(hotspot)
   end
 end
 
@@ -178,13 +196,17 @@ class Hotspot < Parser::AST::Node
     false
   end
 
+  def self.alternatives
+    []
+  end
+
   def initialize(node, conflicts: [])
     @conflicts = conflicts
-    super(:hotspot, [node])
+    super(:"#{self.class.name.downcase.chomp('hotspot')}_hotspot", [node])
   end
 
   def alternatives
-    -> node { node }
+    self.class.alternatives
   end
 
   def alternatives_mapper
@@ -198,6 +220,10 @@ class Hotspot < Parser::AST::Node
 
   def original_node
     children.first
+  end
+
+  def original_location
+    original_node.location
   end
 end
 
@@ -214,15 +240,12 @@ end
 
 
 class OperatorHotspot < MessageHotspot
-  def alternatives
-    self.class.selectors.map do |new_sel|
-      -> node { alternative_node_using(node, new_sel) }
-    end
+  def self.alternatives
+    selectors.map {|sel| sel.to_s.freeze }
   end
 
-  def alternative_node_using(node, new_sel)
-    rec, _sel, *args = *node
-    node.updated(nil, [rec, new_sel, *args])
+  def operator_location
+    original_location.selector
   end
 end
 
@@ -243,15 +266,23 @@ class PredicateHotspot < MessageHotspot
     [/\?\Z/]
   end
 
-  def alternatives
-    [ -> node { node },
-      -> node { Parser::AST::Node.new(:send, [node, :!]) } ]
+  def self.alternatives
+    ['', '!']
+  end
+
+  def expression_location
+    original_location.expression
   end
 end
+
 
 class BlockHotspot < Hotspot
   def self.selectors
     []
+  end
+
+  def self.alternatives
+    selectors.map {|sel| sel.to_s.freeze }
   end
 
   def self.applies?(node)
@@ -260,21 +291,10 @@ class BlockHotspot < Hotspot
     selectors.detect {|hotspot| hotspot === selector }
   end
 
-  def alternatives
-    self.class.selectors.map do |new_sel|
-      -> node { alternative_node_using(node, new_sel) }
-    end
-  end
-
-  def alternative_node_using(node, new_sel)
-    exp, *rest = *node
-    rec, _sel, *args = *exp
-    new_exp = exp.updated(nil, [rec, new_sel, *args])
-
-    node.updated(nil, [new_exp, *rest])
+  def selector_location
+    original_node.to_a.first.location.selector
   end
 end
-
 
 class FilterHotspot < BlockHotspot
   def self.selectors
