@@ -4,15 +4,16 @@ module MyLibGenericTests
   def setup
     @elsa   = Person.new('Elsa',   :female, 12, 30_123_123)
     @pepe   = Person.new('Pepe',   :male,   18, 30_123_121)
+    @pedro  = Person.new('Pedro',  :male,   65, 2_534_112)
     @juan   = Person.new('Juan',   :male,   68, 1_321_120)
     @zulema = Person.new('Zulema', :female, 80, 4_123_121)
 
-    @people = plp_class.new(@elsa, @pepe, @juan, @zulema)
+    @people = plp_class.new(@elsa, @pepe, @pedro, @juan, @zulema)
   end
 
   
   def test_retired
-    assert_equal [@juan, @zulema], @people.retired
+    assert_equal [@pedro, @juan, @zulema], @people.retired
   end
 
   def test_draftable
