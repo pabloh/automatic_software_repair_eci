@@ -152,34 +152,24 @@ private
 end
 
 class AlternativeProgramRewriter < Parser::Rewriter
-  def initialize(alternatives_mapper)
-    @alternatives_mapper = alternatives_mapper
+  def initialize(alterations)
+    @alterations = alterations
   end
 
-  def on_operator_hotspot(hotspot)
-    replace(hotspot.operator_location, alternative_for(hotspot))
+  def on_hotspot(hotspot)
+    alternative_for(hotspot).apply_on(self)
     process(hotspot.original_node)
   end
 
-  alias_method :on_comparison_hotspot, :on_operator_hotspot
-  alias_method :on_equality_hotspot, :on_operator_hotspot
-
-  def on_predicate_hotspot(hotspot)
-    insert_before(hotspot.expression_location, alternative_for(hotspot))
-    process(hotspot.original_node)
-  end
-
-  def on_block_hotspot(hotspot)
-    replace(hotspot.selector_location, alternative_for(hotspot))
-    process(hotspot.original_node)
-  end
-
-  alias_method :on_filter_hotspot, :on_block_hotspot
-  alias_method :on_quantifier_hotspot, :on_block_hotspot
+  alias_method :on_comparison_hotspot, :on_hotspot
+  alias_method :on_equality_hotspot, :on_hotspot
+  alias_method :on_predicate_hotspot, :on_hotspot
+  alias_method :on_filter_hotspot, :on_hotspot
+  alias_method :on_quantifier_hotspot, :on_hotspot
 
 private
   def alternative_for(hotspot)
-    @alternatives_mapper.fetch(hotspot)
+    @alterations.fetch(hotspot)
   end
 end
 
@@ -196,17 +186,9 @@ class Hotspot < Parser::AST::Node
     false
   end
 
-  def self.alternatives
-    []
-  end
-
   def initialize(node, conflicts: [])
     @conflicts = conflicts
     super(:"#{self.class.name.downcase.chomp('hotspot')}_hotspot", [node])
-  end
-
-  def alternatives
-    self.class.alternatives
   end
 
   def alternatives_mapper
@@ -223,8 +205,22 @@ class Hotspot < Parser::AST::Node
     children.first
   end
 
-  def original_location
-    original_node.location
+  def alternatives
+    []
+  end
+
+  def rewrite(&block)
+    Alteration.new(&block)
+  end
+
+  class Alteration
+    def initialize(&block)
+      @transform = block
+    end
+
+    def apply_on(rewriter)
+      @transform.call(rewriter)
+    end
   end
 end
 
@@ -241,12 +237,14 @@ end
 
 
 class OperatorHotspot < MessageHotspot
-  def self.alternatives
-    selectors.map(&:to_s)
+  def alternatives
+    self.class.selectors.map do |sel|
+      rewrite {|rw| rw.replace(operator_location, sel.to_s) }
+    end
   end
 
   def operator_location
-    original_location.selector
+    original_node.location.selector
   end
 end
 
@@ -267,12 +265,13 @@ class PredicateHotspot < MessageHotspot
     [/\?\Z/]
   end
 
-  def self.alternatives
-    ['', '!']
+  def alternatives
+    [ rewrite {},
+      rewrite {|rw| rw.insert_before(expression_location, '!') } ]
   end
 
   def expression_location
-    original_location.expression
+    original_node.location.expression
   end
 end
 
@@ -282,8 +281,10 @@ class BlockHotspot < Hotspot
     []
   end
 
-  def self.alternatives
-    selectors.map(&:to_s)
+  def alternatives
+    self.class.selectors.map do |sel|
+      rewrite {|rw| rw.replace(selector_location, sel.to_s) }
+    end
   end
 
   def self.applies?(node)
